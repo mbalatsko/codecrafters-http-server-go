@@ -2,62 +2,306 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"slices"
+	"strconv"
+	"strings"
 )
 
 const httpVersion = "HTTP/1.1"
 const eol = "\r\n"
 
-type HttpStatus struct {
+type Headers map[string]string
+
+type Method string
+
+type HandlerFunc func(*Request, *Response)
+
+const (
+	MethodGet  Method = "GET"
+	MethodPost Method = "POST"
+)
+
+type Response struct {
+	Status  ResponseStatus
+	Headers Headers
+	Body    []byte
+}
+
+type ResponseStatus struct {
 	Code int
 }
 
-func (status *HttpStatus) String() string {
+func (status *ResponseStatus) String() string {
 	return fmt.Sprintf("%d %s", status.Code, http.StatusText(status.Code))
 }
 
-type HttpResponse struct {
-	Status  HttpStatus
-	Headers map[string]string
-	Body    string
+func (response *Response) SetStatus(code int) {
+	response.Status = ResponseStatus{code}
 }
 
-func makeHttpResponse(status HttpStatus) *HttpResponse {
-	return &HttpResponse{
-		Status:  status,
+func (response *Response) SetHeader(header string, value string) {
+	response.Headers[header] = value
+}
+
+func (response *Response) SetBody(body []byte, contentType string) {
+	response.Body = body
+	response.SetHeader("Content-Length", strconv.Itoa(len(body)))
+	response.SetHeader("Content-Type", contentType)
+}
+
+func (response *Response) SetEmptyBody() {
+	response.Body = []byte{}
+	response.SetHeader("Content-Length", "0")
+}
+
+func newResponse() *Response {
+	return &Response{
 		Headers: make(map[string]string),
-		Body:    "",
+		Body:    make([]byte, 0),
 	}
 }
 
-func (response *HttpResponse) String() string {
-	return fmt.Sprintf("%s %s", httpVersion, &response.Status) + eol + eol
+func (response *Response) Combine() []byte {
+	// Status section
+	statusSection := fmt.Sprintf("%s %s", httpVersion, &response.Status)
+
+	// Headers section
+	var headersSection string
+	for header, value := range response.Headers {
+		headersSection += fmt.Sprintf("%s: %s", header, value) + eol
+	}
+
+	// concat and convert to bytes
+	topSectionsByteA := []byte(statusSection + eol + headersSection + eol)
+
+	// append body bytes
+	return append(topSectionsByteA, response.Body...)
+}
+
+type Request struct {
+	Host    net.Addr
+	Method  Method
+	Path    string
+	Headers Headers
+	Body    []byte
+}
+
+func parseFirstRequestLine(s string) (method Method, path string, err error) {
+	sParts := strings.Split(s, " ")
+	if len(s) < 3 {
+		return method, path, fmt.Errorf("error parsing request first line")
+	}
+
+	switch Method(sParts[0]) {
+	case MethodGet, MethodPost:
+		method = Method(s[0])
+	default:
+		return method, path, fmt.Errorf("unsupported method %s given", sParts[0])
+	}
+
+	parsedUrl, err := url.Parse(sParts[1])
+	if err != nil {
+		return method, path, fmt.Errorf("error occurred in path parsing %s", err.Error())
+	}
+
+	return method, parsedUrl.Path, nil
+}
+
+func parseHeader(headerLine string) (key string, value string, err error) {
+	keyIdx := strings.Index(headerLine, ": ")
+	if keyIdx == -1 {
+		return key, value, fmt.Errorf("no key found in header line: %s", headerLine)
+	}
+	return headerLine[:keyIdx], headerLine[keyIdx+2:], nil
+}
+
+func parseHeaders(headersLines []string) (Headers, error) {
+	headers := make(Headers)
+	for _, hl := range headersLines {
+		k, v, err := parseHeader(hl)
+		if err != nil {
+			return nil, err
+		}
+		headers[k] = v
+	}
+	return headers, nil
+}
+
+func ReadAll(conn net.Conn) ([]byte, error) {
+	const buffSize = 512
+	b := make([]byte, 0, buffSize)
+	for {
+		n, err := conn.Read(b[len(b):cap(b)])
+		b = b[:len(b)+n]
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+			}
+			return b, err
+		}
+
+		if len(b) == cap(b) {
+			// Add more capacity (let append pick how much).
+			b = append(b, 0)[:len(b)]
+		}
+
+		if n < buffSize {
+			return b, nil
+		}
+	}
+}
+
+func parseRequest(conn net.Conn) (*Request, error) {
+	rawRequestBytes, err := ReadAll(conn)
+	if err != nil {
+		return nil, err
+	}
+
+	rawRequest := string(rawRequestBytes)
+	rawRequestParts := strings.Split(rawRequest, eol)
+
+	if len(rawRequestParts) < 3 {
+		return nil, fmt.Errorf("content is too short")
+	}
+
+	method, path, err := parseFirstRequestLine(rawRequestParts[0])
+	if err != nil {
+		return nil, err
+	}
+
+	headersEndIdx := slices.Index(rawRequestParts, "")
+	if headersEndIdx == -1 {
+		return nil, fmt.Errorf("malformed request, end of headers not found")
+	}
+
+	headers, err := parseHeaders(rawRequestParts[1:headersEndIdx])
+	if err != nil {
+		return nil, err
+	}
+
+	body := []byte(strings.Join(rawRequestParts[headersEndIdx+1:], eol))
+
+	return &Request{
+		Host:    conn.RemoteAddr(),
+		Method:  method,
+		Path:    path,
+		Headers: headers,
+		Body:    body,
+	}, nil
+}
+
+type Route struct {
+	Path    string
+	Handler HandlerFunc
+}
+
+type Router struct {
+	Routes         []Route
+	DefaultHandler HandlerFunc
+}
+
+func newRouter(defaultHandler HandlerFunc, routes ...Route) *Router {
+	return &Router{
+		Routes:         routes,
+		DefaultHandler: defaultHandler,
+	}
+}
+
+type Server struct {
+	Addr     string
+	Listener net.Listener
+	Router   *Router
+}
+
+func newServer(addr string, router *Router) *Server {
+	return &Server{
+		Addr:   addr,
+		Router: router,
+	}
+}
+
+func (server *Server) Start() error {
+	l, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		log.Fatal("Failed to bind to port")
+		return err
+	}
+	server.Listener = l
+	log.Printf("Started TCP server on %s\n", l.Addr().String())
+	return nil
+}
+
+func (server *Server) ServeForever() error {
+	for {
+		conn, err := server.Listener.Accept()
+		if err != nil {
+			log.Fatal("Error accepting connection: ", err.Error())
+			continue
+		}
+		log.Printf("Connection received from %s\n", conn.RemoteAddr())
+
+		go func() {
+			defer conn.Close()
+
+			req, err := parseRequest(conn)
+			if err != nil {
+				log.Fatalf("Failed to parse request: %s, closing connection", err.Error())
+				return
+			}
+			resp := newResponse()
+
+			found := false
+			for _, r := range server.Router.Routes {
+				log.Println(req.Path)
+				if r.Path == req.Path {
+					r.Handler(req, resp)
+					found = true
+					break
+				}
+			}
+			if !found {
+				server.Router.DefaultHandler(req, resp)
+			}
+
+			_, err = conn.Write(resp.Combine())
+			if err != nil {
+				log.Fatal("Error writing to connection: ", err.Error())
+				return
+			}
+		}()
+	}
+}
+
+func NotFoundHandler(req *Request, resp *Response) {
+	resp.SetStatus(404)
+}
+
+func SuccessHandler(req *Request, resp *Response) {
+	resp.SetStatus(200)
 }
 
 func main() {
 	addr := "0.0.0.0:4221"
-	l, err := net.Listen("tcp", addr)
+
+	router := newRouter(
+		NotFoundHandler,
+		Route{"/", SuccessHandler},
+	)
+	server := newServer(addr, router)
+
+	err := server.Start()
 	if err != nil {
-		log.Fatal("Failed to bind to port 4221")
 		os.Exit(1)
 	}
-	log.Printf("Started TCP server on %s\n", addr)
 
-	conn, err := l.Accept()
+	err = server.ServeForever()
 	if err != nil {
-		log.Fatal("Error accepting connection: ", err.Error())
-		os.Exit(1)
-	}
-	log.Printf("Connection received from %s\n", conn.RemoteAddr())
-	defer conn.Close()
-
-	response := makeHttpResponse(HttpStatus{200}).String()
-	_, err = conn.Write([]byte(response))
-	if err != nil {
-		log.Fatal("Error writting to connection: ", err.Error())
 		os.Exit(1)
 	}
 }
