@@ -289,6 +289,12 @@ func EchoHandler(req *Request, resp *Response) {
 	resp.SetBody([]byte(echoStr), "text/plain")
 }
 
+func UserAgentHandler(req *Request, resp *Response) {
+	resp.SetStatus(200)
+	userAgent := req.Headers["User-Agent"]
+	resp.SetBody([]byte(userAgent), "text/plain")
+}
+
 func main() {
 	addr := "0.0.0.0:4221"
 
@@ -296,6 +302,7 @@ func main() {
 		NotFoundHandler,
 		Route{*regexp.MustCompile(`^/$`), SuccessHandler},
 		Route{*regexp.MustCompile(`^/echo/\w+$`), EchoHandler},
+		Route{*regexp.MustCompile(`^/user\-agent$`), UserAgentHandler},
 	)
 	server := newServer(addr, router)
 
