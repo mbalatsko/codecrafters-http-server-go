@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -197,7 +198,7 @@ func parseRequest(conn net.Conn) (*Request, error) {
 }
 
 type Route struct {
-	Path    string
+	Path    regexp.Regexp
 	Handler HandlerFunc
 }
 
@@ -211,6 +212,15 @@ func newRouter(defaultHandler HandlerFunc, routes ...Route) *Router {
 		Routes:         routes,
 		DefaultHandler: defaultHandler,
 	}
+}
+
+func (r *Router) getHandler(path string) HandlerFunc {
+	for _, rr := range r.Routes {
+		if rr.Path.MatchString(path) {
+			return rr.Handler
+		}
+	}
+	return r.DefaultHandler
 }
 
 type Server struct {
@@ -255,20 +265,7 @@ func (server *Server) ServeForever() error {
 				return
 			}
 			resp := newResponse()
-
-			found := false
-			for _, r := range server.Router.Routes {
-				log.Println(req.Path)
-				if r.Path == req.Path {
-					r.Handler(req, resp)
-					found = true
-					break
-				}
-			}
-			if !found {
-				server.Router.DefaultHandler(req, resp)
-			}
-
+			server.Router.getHandler(req.Path)(req, resp)
 			_, err = conn.Write(resp.Combine())
 			if err != nil {
 				log.Fatal("Error writing to connection: ", err.Error())
@@ -286,12 +283,19 @@ func SuccessHandler(req *Request, resp *Response) {
 	resp.SetStatus(200)
 }
 
+func EchoHandler(req *Request, resp *Response) {
+	resp.SetStatus(200)
+	echoStr := strings.Split(req.Path, "/")[2]
+	resp.SetBody([]byte(echoStr), "text/plain")
+}
+
 func main() {
 	addr := "0.0.0.0:4221"
 
 	router := newRouter(
 		NotFoundHandler,
-		Route{"/", SuccessHandler},
+		Route{*regexp.MustCompile(`^/$`), SuccessHandler},
+		Route{*regexp.MustCompile(`^/echo/\w+$`), EchoHandler},
 	)
 	server := newServer(addr, router)
 
