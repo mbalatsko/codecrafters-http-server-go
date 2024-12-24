@@ -83,10 +83,13 @@ func (response *Response) SetEmptyBody() {
 func (response *Response) GzipBody() {
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
-	defer zw.Close()
 	_, err := zw.Write(response.Body)
 	if err != nil {
 		log.Fatalf("Failed to gzip body: %s", response.Body)
+		return
+	}
+	if err := zw.Close(); err != nil {
+		log.Fatal("Failed to close gzip writer")
 		return
 	}
 
@@ -98,7 +101,7 @@ func (resp *Response) Combine(req *Request) []byte {
 	reqAccEnc, isSet := req.Headers["Accept-Encoding"]
 	if isSet {
 		reqAccEncParts := strings.Split(reqAccEnc, ", ")
-		outerLoop:
+	outerLoop:
 		for _, enc := range reqAccEncParts {
 			switch Encoding(enc) {
 			case EncodingGzip:
