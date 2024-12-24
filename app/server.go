@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -16,6 +18,8 @@ import (
 
 const httpVersion = "HTTP/1.1"
 const eol = "\r\n"
+
+var directory string
 
 type Headers map[string]string
 
@@ -295,6 +299,23 @@ func UserAgentHandler(req *Request, resp *Response) {
 	resp.SetBody([]byte(userAgent), "text/plain")
 }
 
+func FileDirectoryHandler(req *Request, resp *Response) {
+	filename := strings.Split(req.Path, "/")[2]
+	data, err := os.ReadFile(path.Join(directory, filename))
+	if err != nil {
+		resp.SetStatus(404)
+		return
+	}
+
+	resp.SetStatus(200)
+	resp.SetBody(data, "application/octet-stream")
+}
+
+func init() {
+	flag.StringVar(&directory, "directory", "/tmp", "Directory to take files")
+	flag.Parse()
+}
+
 func main() {
 	addr := "0.0.0.0:4221"
 
@@ -303,6 +324,7 @@ func main() {
 		Route{*regexp.MustCompile(`^/$`), SuccessHandler},
 		Route{*regexp.MustCompile(`^/echo/\w+$`), EchoHandler},
 		Route{*regexp.MustCompile(`^/user\-agent$`), UserAgentHandler},
+		Route{*regexp.MustCompile(`^/files/\w+$`), FileDirectoryHandler},
 	)
 	server := newServer(addr, router)
 
