@@ -105,7 +105,7 @@ func parseFirstRequestLine(s string) (method Method, path string, err error) {
 
 	switch Method(sParts[0]) {
 	case MethodGet, MethodPost:
-		method = Method(s[0])
+		method = Method(sParts[0])
 	default:
 		return method, path, fmt.Errorf("unsupported method %s given", sParts[0])
 	}
@@ -203,6 +203,7 @@ func parseRequest(conn net.Conn) (*Request, error) {
 
 type Route struct {
 	Path    regexp.Regexp
+	Method  Method
 	Handler HandlerFunc
 }
 
@@ -218,9 +219,9 @@ func newRouter(defaultHandler HandlerFunc, routes ...Route) *Router {
 	}
 }
 
-func (r *Router) getHandler(path string) HandlerFunc {
+func (r *Router) getHandler(path string, method Method) HandlerFunc {
 	for _, rr := range r.Routes {
-		if rr.Path.MatchString(path) {
+		if rr.Path.MatchString(path) && rr.Method == method {
 			return rr.Handler
 		}
 	}
@@ -269,7 +270,7 @@ func (server *Server) ServeForever() error {
 				return
 			}
 			resp := newResponse()
-			server.Router.getHandler(req.Path)(req, resp)
+			server.Router.getHandler(req.Path, req.Method)(req, resp)
 			_, err = conn.Write(resp.Combine())
 			if err != nil {
 				log.Fatal("Error writing to connection: ", err.Error())
@@ -299,7 +300,7 @@ func UserAgentHandler(req *Request, resp *Response) {
 	resp.SetBody([]byte(userAgent), "text/plain")
 }
 
-func FileDirectoryHandler(req *Request, resp *Response) {
+func GetFileHandler(req *Request, resp *Response) {
 	filename := strings.Split(req.Path, "/")[2]
 	data, err := os.ReadFile(path.Join(directory, filename))
 	if err != nil {
@@ -309,6 +310,17 @@ func FileDirectoryHandler(req *Request, resp *Response) {
 
 	resp.SetStatus(200)
 	resp.SetBody(data, "application/octet-stream")
+}
+
+func CreateFileHandler(req *Request, resp *Response) {
+	filename := strings.Split(req.Path, "/")[2]
+	err := os.WriteFile(path.Join(directory, filename), req.Body, 0644)
+	if err != nil {
+		resp.SetStatus(500)
+		return
+	}
+
+	resp.SetStatus(201)
 }
 
 func init() {
@@ -321,10 +333,11 @@ func main() {
 
 	router := newRouter(
 		NotFoundHandler,
-		Route{*regexp.MustCompile(`^/$`), SuccessHandler},
-		Route{*regexp.MustCompile(`^/echo/\w+$`), EchoHandler},
-		Route{*regexp.MustCompile(`^/user\-agent$`), UserAgentHandler},
-		Route{*regexp.MustCompile(`^/files/\w+$`), FileDirectoryHandler},
+		Route{*regexp.MustCompile(`^/$`), MethodGet, SuccessHandler},
+		Route{*regexp.MustCompile(`^/echo/\w+$`), MethodGet, EchoHandler},
+		Route{*regexp.MustCompile(`^/user\-agent$`), MethodGet, UserAgentHandler},
+		Route{*regexp.MustCompile(`^/files/\w+$`), MethodGet, GetFileHandler},
+		Route{*regexp.MustCompile(`^/files/\w+$`), MethodPost, CreateFileHandler},
 	)
 	server := newServer(addr, router)
 
