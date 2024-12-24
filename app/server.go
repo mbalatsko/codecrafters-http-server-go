@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"flag"
 	"fmt"
 	"io"
@@ -23,13 +25,19 @@ var directory string
 
 type Headers map[string]string
 
-type Method string
-
 type HandlerFunc func(*Request, *Response)
+
+type Method string
 
 const (
 	MethodGet  Method = "GET"
 	MethodPost Method = "POST"
+)
+
+type Encoding string
+
+const (
+	EncodingGzip Encoding = "gzip"
 )
 
 type Response struct {
@@ -40,6 +48,13 @@ type Response struct {
 
 type ResponseStatus struct {
 	Code int
+}
+
+func newResponse() *Response {
+	return &Response{
+		Headers: make(map[string]string),
+		Body:    make([]byte, 0),
+	}
 }
 
 func (status *ResponseStatus) String() string {
@@ -65,20 +80,42 @@ func (response *Response) SetEmptyBody() {
 	response.SetHeader("Content-Length", "0")
 }
 
-func newResponse() *Response {
-	return &Response{
-		Headers: make(map[string]string),
-		Body:    make([]byte, 0),
+func (response *Response) GzipBody() {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	defer zw.Close()
+	_, err := zw.Write(response.Body)
+	if err != nil {
+		log.Fatalf("Failed to gzip body: %s", response.Body)
+		return
 	}
+
+	response.SetBody(buf.Bytes(), response.Headers["Content-Type"])
+	response.SetHeader("Content-Encoding", "gzip")
 }
 
-func (response *Response) Combine() []byte {
+func (resp *Response) Combine(req *Request) []byte {
+	reqAccEnc, isSet := req.Headers["Accept-Encoding"]
+	if isSet {
+		reqAccEncParts := strings.Split(reqAccEnc, ", ")
+		outerLoop:
+		for _, enc := range reqAccEncParts {
+			switch Encoding(enc) {
+			case EncodingGzip:
+				resp.GzipBody()
+				break outerLoop
+			default:
+				continue
+			}
+		}
+	}
+
 	// Status section
-	statusSection := fmt.Sprintf("%s %s", httpVersion, &response.Status)
+	statusSection := fmt.Sprintf("%s %s", httpVersion, &resp.Status)
 
 	// Headers section
 	var headersSection string
-	for header, value := range response.Headers {
+	for header, value := range resp.Headers {
 		headersSection += fmt.Sprintf("%s: %s", header, value) + eol
 	}
 
@@ -86,7 +123,7 @@ func (response *Response) Combine() []byte {
 	topSectionsByteA := []byte(statusSection + eol + headersSection + eol)
 
 	// append body bytes
-	return append(topSectionsByteA, response.Body...)
+	return append(topSectionsByteA, resp.Body...)
 }
 
 type Request struct {
@@ -271,7 +308,7 @@ func (server *Server) ServeForever() error {
 			}
 			resp := newResponse()
 			server.Router.getHandler(req.Path, req.Method)(req, resp)
-			_, err = conn.Write(resp.Combine())
+			_, err = conn.Write(resp.Combine(req))
 			if err != nil {
 				log.Fatal("Error writing to connection: ", err.Error())
 				return
