@@ -317,7 +317,6 @@ func (server *Server) ServeForever() error {
 				var closeReceived = false
 				for key, value := range req.Headers {
 					if key == "Connection" && value == "close" {
-						log.Printf("Received signal to close connection, closing connection from %s\n", conn.RemoteAddr())
 						closeReceived = true
 						break
 					}
@@ -336,6 +335,7 @@ func (server *Server) ServeForever() error {
 				}
 
 				if closeReceived {
+					log.Printf("Received signal to close connection, closing connection from %s\n", conn.RemoteAddr())
 					return
 				}
 			}
