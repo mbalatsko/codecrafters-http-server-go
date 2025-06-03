@@ -304,17 +304,28 @@ func (server *Server) ServeForever() error {
 		go func() {
 			defer conn.Close()
 
-			req, err := parseRequest(conn)
-			if err != nil {
-				log.Fatalf("Failed to parse request: %s, closing connection", err.Error())
-				return
-			}
-			resp := newResponse()
-			server.Router.getHandler(req.Path, req.Method)(req, resp)
-			_, err = conn.Write(resp.Combine(req))
-			if err != nil {
-				log.Fatal("Error writing to connection: ", err.Error())
-				return
+			for {
+				req, err := parseRequest(conn)
+				if err != nil {
+					log.Printf("Failed to parse request: %s, closing connection from %s\n", err.Error(), conn.RemoteAddr())
+					return
+				}
+
+				// check if close connection requested
+				for key, value := range req.Headers {
+					if key == "Connection" && value == "close" {
+						log.Printf("Received signal to close connection, closing connection from %s\n", conn.RemoteAddr())
+						return
+					}
+				} 
+
+				resp := newResponse()
+				server.Router.getHandler(req.Path, req.Method)(req, resp)
+				_, err = conn.Write(resp.Combine(req))
+				if err != nil {
+					log.Println("Error writing to connection: ", err.Error())
+					return
+				}
 			}
 		}()
 	}
