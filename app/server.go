@@ -325,10 +325,9 @@ func (server *Server) ServeForever() error {
 
 				resp := newResponse()
 
-				if !closeReceived {
-					server.Router.getHandler(req.Path, req.Method)(req, resp)
-				} else {
-					ClosureHandler(req, resp)
+				server.Router.getHandler(req.Path, req.Method)(req, resp)
+				if closeReceived {
+					resp.SetHeader("Connection", "close")
 				}
 				_, err = conn.Write(resp.Combine(req))
 				if err != nil {
@@ -385,12 +384,6 @@ func CreateFileHandler(req *Request, resp *Response) {
 	}
 
 	resp.SetStatus(201)
-}
-
-func ClosureHandler(req *Request, resp *Response) {
-	resp.SetStatus(200)
-	resp.SetEmptyBody()
-	resp.SetHeader("Connection", "close")
 }
 
 func init() {
