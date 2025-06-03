@@ -72,7 +72,9 @@ func (response *Response) SetHeader(header string, value string) {
 func (response *Response) SetBody(body []byte, contentType string) {
 	response.Body = body
 	response.SetHeader("Content-Length", strconv.Itoa(len(body)))
-	response.SetHeader("Content-Type", contentType)
+	if len(contentType) > 0 {
+		response.SetHeader("Content-Type", contentType)
+	}
 }
 
 func (response *Response) SetEmptyBody() {
@@ -312,18 +314,29 @@ func (server *Server) ServeForever() error {
 				}
 
 				// check if close connection requested
+				var closeReceived = false
 				for key, value := range req.Headers {
 					if key == "Connection" && value == "close" {
 						log.Printf("Received signal to close connection, closing connection from %s\n", conn.RemoteAddr())
-						return
+						closeReceived = true
+						break
 					}
-				} 
+				}
 
 				resp := newResponse()
-				server.Router.getHandler(req.Path, req.Method)(req, resp)
+
+				if !closeReceived {
+					server.Router.getHandler(req.Path, req.Method)(req, resp)
+				} else {
+					ClosureHandler(req, resp)
+				}
 				_, err = conn.Write(resp.Combine(req))
 				if err != nil {
 					log.Println("Error writing to connection: ", err.Error())
+					return
+				}
+
+				if closeReceived {
 					return
 				}
 			}
@@ -372,6 +385,12 @@ func CreateFileHandler(req *Request, resp *Response) {
 	}
 
 	resp.SetStatus(201)
+}
+
+func ClosureHandler(req *Request, resp *Response) {
+	resp.SetStatus(200)
+	resp.SetEmptyBody()
+	resp.SetHeader("Connection", "close")
 }
 
 func init() {
